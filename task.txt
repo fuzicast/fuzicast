@@ -1,0 +1,2086 @@
+
+FIX TAGS
+35=message type
+34=sequence number
+115=on behalf of company mmid
+109=client mmid	
+49=sender id
+52=sending timestamp
+PINKFIX
+latency for incoming: send_ts - receive_ts
+latency for outgoing: transaction_ts - send_ts
+we want to get delayed messages
+we want to get count of delayed messages per customer per second
+get_pinkfix_attr.pl: need to fix error at 1st record
+
+./generate_eod.sh -S ps_prod_tcp -D secmstr -T "16:00:00"
+
+Get all records where bidprice or askprice > 0 and bidsize or asksize = 0 ===================================================
+egrep "132=([1-9]|0\.0*[1-9])" UBSS_Quotes.1.1.INCOMING | egrep -v "134=[^0]" > debug1 && wc -l debug1
+egrep "133=([1-9]|0\.0*[1-9])" UBSS_Quotes.1.1.INCOMING | egrep -v "135=[^0]" > debug1 && wc -l debug1
+
+PinkFIX Quotes Summary Query====================================================================================
+select z.gateway_nm, med_quote_sec, max_count, over_throttle_ct, total_delay_msg, throttle
+from
+(select distinct gateway_nm, median(msg_count) over (partition by gateway_nm) as med_quote_sec
+from 
+	(select gateway_nm, send_ts, sum(msg_recd_ct) as msg_count
+	from public.pmm_pfix_msg_summary
+	where send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+	and message_type_cd = 'S'
+	group by gateway_nm, send_ts) a
+group by gateway_nm, msg_count
+order by 1) z,
+(select a.gateway_nm, max(sum_count) as 'max_count', b.throttle_nr as throttle
+from (
+select gateway_nm, send_ts, sum(msg_recd_ct) as 'sum_count'
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+group by gateway_nm, send_ts
+order by 3 desc
+) a, (select distinct gateway_nm, throttle_nr
+from public.pmm_pfix_msg_summary
+where send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')) b
+where a.gateway_nm = b.gateway_nm
+group by a.gateway_nm , b.throttle_nr
+order by 1) y
+full outer join
+(select e.gateway_nm, over_throttle_ct, total_delay_msg
+from
+(select a.gateway_nm, count(msg_ct) as over_throttle_ct
+from
+(select gateway_nm, sum(msg_recd_ct) as msg_ct
+from public.pmm_pfix_msg_summary
+where send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+and message_type_cd = 'S'
+group by gateway_nm, send_ts) a,
+(select gateway_nm, throttle_nr as throttle_limit
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+group by 1,2) b
+where msg_ct > throttle_limit
+and a.gateway_nm = b.gateway_nm
+group by a.gateway_nm) e,
+(select gateway_nm, sum(num_delayed_msg) as total_delay_msg
+from
+(select c.gateway_nm, msg_ct - throttle_nr as num_delayed_msg, g.throttle_nr
+from
+(select gateway_nm, sum(msg_recd_ct) as msg_ct
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+group by gateway_nm, send_ts) c,
+(select gateway_nm, throttle_nr
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date || ' 15:59:00', 'YYYY-MM-DD HH24:MI:SS')
+group by 1,2) g
+where msg_ct > throttle_nr
+and c.gateway_nm = g.gateway_nm) d
+group by 1) f
+where e.gateway_nm = f.gateway_nm) x
+on y.gateway_nm = x.gateway_nm
+where z.gateway_nm = y.gateway_nm
+==========================================================================================
+
+============================TP Query to get message send and receive count for pinkfix===========================================
+select 'Send' as 'S/R', *
+from (select gateway_nm, to_char(send_ts, 'yyyy-mm-dd') as 'date', extract(hour from send_ts) as 'hour', extract(minute from send_ts) as 'minute', extract(second from send_ts) as 'second', sum(msg_recd_ct) as 'sum_count'
+from (select distinct gateway_nm, send_ts, receive_ts, message_type_cd, msg_recd_ct
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and date(send_ts) = current_date
+order by send_ts, receive_ts) a
+group by 1,2,3,4,5) x
+where sum_count > 40
+union all
+select 'Receive' as 'S/R', *
+from (select gateway_nm, to_char(receive_ts, 'yyyy-mm-dd') as 'date', extract(hour from receive_ts) as 'hour', extract(minute from receive_ts) as 'minute', extract(second from receive_ts) as 'second', sum(msg_recd_ct) as 'sum_count'
+from (select distinct gateway_nm, send_ts, receive_ts, message_type_cd, msg_recd_ct
+from public.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and date(send_ts) = current_date
+order by send_ts, receive_ts) a
+group by 1,2,3,4,5) x
+where sum_count > 40
+order by 1,2,3,4,5
+
+Grepping for MMID and trader in MDS log files=============================================
+egrep 'AABA:(JMEAGHER|MEAGHER2|MAPPLE|MAPPLE2)' mds1*.mds.log.2011-05-20
+egrep 'TDL.*RODM:DHANLEY.*o=QuoteMessage' mds1*.mds.log.2011-05-23
+
+
+
+
+Query for pinkfix quote max, median and total===============================================
+select distinct date(dt), mmid, median(ct) over (partition by mmid) as mct
+from
+(select to_char(quotedatetime, 'yyyy-mm-dd hh:mi:ss') dt, mmid, count(sequencenumber) ct
+from quote
+where publishdate between '2011-06-01' and '2011-06-08'
+and sourcesystem = 'pink'
+and updatetype < 4
+group by 1,2) b
+
+select mmid, max(ct)
+from 
+(select to_char(quotedatetime, 'yyyy-mm-dd hh:mi:ss') dt, mmid, count(sequencenumber) ct
+from quote
+where publishdate between '2011-06-01' and '2011-06-09'
+and sourcesystem = 'pink'
+and updatetype < 4
+group by 1,2) a
+group by 1
+
+^Complete Query
+select c.quotedate, c.mmid, peak, median, total 
+from
+(select mmid, max(ct) as peak
+from 
+(select to_char(quotedatetime, 'yyyy-mm-dd hh:mi:ss') dt, mmid, count(sequencenumber) ct
+from quote
+where publishdate between '2011-04-07' and '2011-04-12'
+and sourcesystem = 'pink'
+and updatetype < 4
+group by 1,2) a
+group by 1) e,
+(select distinct date(dt) as quotedate, mmid, median(ct) over (partition by mmid, date(dt)) as median
+from
+(select to_char(quotedatetime, 'yyyy-mm-dd hh:mi:ss') dt, mmid, count(sequencenumber) ct
+from quote
+where publishdate between '2011-04-07' and '2011-04-12'
+and sourcesystem = 'pink'
+and updatetype < 4
+group by 1,2) b) d,
+(select quotedate, mmid, count(sequencenumber) as total
+from quote
+where publishdate between '2011-04-07' and '2011-04-12'
+and sourcesystem = 'pink'
+and updatetype < 4
+group by 1,2) c
+where c.mmid = d.mmid
+and d.mmid = e.mmid
+and c.quotedate = d.quotedate
+
+
+
+
+====New Query for PinkFIX summary with over throttle timestamps (between 09:30:10 to 15:59:59 and msg count >= 90% of throttle) Note: fix current_date========================
+select h.gateway_nm, med_quote_sec, max_count, over_throttle_ct, total_delay_msg, throttle, i.send_ts, msg_ct
+from
+(select z.gateway_nm, med_quote_sec, max_count, over_throttle_ct, total_delay_msg, throttle
+from
+(select distinct gateway_nm, median(msg_count) over (partition by gateway_nm) as med_quote_sec
+from 
+	(select gateway_nm, send_ts, sum(msg_recd_ct) as msg_count
+	from $SCHEMA.pmm_pfix_msg_summary
+	where send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+	and message_type_cd = 'S'
+	group by gateway_nm, send_ts) a
+group by gateway_nm, msg_count
+order by 1) z,
+(select a.gateway_nm, max(sum_count) as 'max_count', b.throttle_nr as throttle
+from (
+select gateway_nm, send_ts, sum(msg_recd_ct) as 'sum_count'
+from $SCHEMA.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+group by gateway_nm, send_ts
+order by 3 desc
+) a, (select distinct gateway_nm, throttle_nr
+from $SCHEMA.pmm_pfix_msg_summary
+where send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')) b
+where a.gateway_nm = b.gateway_nm
+group by a.gateway_nm , b.throttle_nr
+order by 1) y
+full outer join
+(select e.gateway_nm, over_throttle_ct, total_delay_msg
+from
+(select a.gateway_nm, count(msg_ct) as over_throttle_ct
+from
+(select gateway_nm, sum(msg_recd_ct) as msg_ct
+from $SCHEMA.pmm_pfix_msg_summary
+where send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+and message_type_cd = 'S'
+group by gateway_nm, send_ts) a,
+(select gateway_nm, throttle_nr as throttle_limit
+from $SCHEMA.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+group by 1,2) b
+where msg_ct > throttle_limit
+and a.gateway_nm = b.gateway_nm
+group by a.gateway_nm) e,
+(select gateway_nm, sum(num_delayed_msg) as total_delay_msg
+from
+(select c.gateway_nm, msg_ct - throttle_nr as num_delayed_msg, g.throttle_nr
+from
+(select gateway_nm, sum(msg_recd_ct) as msg_ct
+from $SCHEMA.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+group by gateway_nm, send_ts) c,
+(select gateway_nm, throttle_nr
+from $SCHEMA.pmm_pfix_msg_summary
+where message_type_cd = 'S'
+and send_ts between to_timestamp(current_date -4 || ' 09:30:00', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+group by 1,2) g
+where msg_ct > throttle_nr
+and c.gateway_nm = g.gateway_nm) d
+group by 1) f
+where e.gateway_nm = f.gateway_nm) x
+on y.gateway_nm = x.gateway_nm
+where z.gateway_nm = y.gateway_nm) h
+left outer join
+(select gateway_nm, send_ts, throttle_nr, sum(msg_recd_ct) as msg_ct
+from $SCHEMA.pmm_pfix_msg_summary
+where send_ts between to_timestamp(current_date -4 || ' 09:30:10', 'YYYY-MM-DD HH24:MI:SS') and to_timestamp(current_date -4 || ' 15:59:59', 'YYYY-MM-DD HH24:MI:SS')
+and message_type_cd = 'S'
+group by 1,2,3
+having sum(msg_recd_ct) >= throttle_nr*0.9) i
+on i.gateway_nm = h.gateway_nm
+
+
+==== Solr =====================
+you can checkout the project at svn://subversion.ps/pinkcontent/otcsolr
+and svn://subversion.ps/pinkcommon
+http://solr1.test.ps:8080/solr/core3/admin/file/?file=schema.xml
+http://solr1.test.ps:8080/solr/core3/admin/dataimport.jsp?handler=/dataimport
+
+====idgar/idgar123============
+
+===jQuery for Suggestion Box (IDGAR)===
+code
+====
+   $(document).ready(function(){
+            //the blur and click evnets are not working correctly, work on it.
+
+            $("#transferagent").suggestions(SpcompanySearchService.getSpcompany);
+
+
+            $("#transferagent").keyup(function(event){
+                if($("#transferagent").val() != ""){
+                    $("#suggestions").css("visibility", "visible");
+                    $("#suggestions").hide();
+                    $("#suggestions").fadeIn("fast");
+                    var query = dwr.util.getValue("transferagent");
+                    $("#suggestions").empty();
+                    $("#suggestions").append("<ul>").css({
+                                'list-style-type': 'none',
+                                'cursor': 'pointer'
+                            });
+                    SpcompanySearchService.getSpcompany(query, function(companies){
+                        $.each(companies, function(index, value){
+                            $("#suggestions").append("<li>" + value + "</li>").children("li").mouseover(function(event){
+                                $(this).removeClass("suggestions");
+                                $(this).addClass("suggestions_hover");
+                            }).mouseout(function(){
+                                $(this).removeClass("suggestions_hover");
+                                $(this).addClass("suggestions");
+                            }).click(function(){
+                                        $("#transferagent").val($(this).text());
+                                        $("#suggestions").hide();
+                                    });
+                        });
+                    });
+                    $("#suggestions").append("</ul>");
+                }else{
+                    $("#suggestions").fadeOut("fast", function(){
+                        $("#suggestions").css("visibility", "hidden");
+                    });
+                }
+            });
+
+            $("#transferagent").blur(function(){
+                setTimeout(function(){
+                    if($("#suggestions").css("visibility") == "visible"){
+                        $("#suggestions").hide();
+                    }
+                }, 100);
+            });
+
+
+        });
+		
+
+=== Query for GP report user count ===		
+select gcd_customer_id, gcd_loc_code, 
+sum(gcd_users) as gcd_users, 
+sum(gcd_priced_quote) as gcd_priced_quote, 
+sum(gcd_unpriced_quote) as gcd_unpriced_quote, 
+sum(gcd_over100k_quote) as gcd_over100k_quote, 
+sum(gcd_priced_msg) as gcd_priced_msg, 
+sum(gcd_unpriced_msg) as gcd_unpriced_msg
+from (
+select gcd_customer_id, gcd_loc_code, 
+case when trim(gcd_sku) = 'OTCDNASD' then gcd_quantity else 0 end gcd_users, 
+case when trim(gcd_sku) = 'QUOT-PS' then gcd_quantity else 0 end gcd_priced_quote,
+case when trim(gcd_sku) = 'QUOT-UP' then gcd_quantity else 0 end gcd_unpriced_quote,
+case when trim(gcd_sku) = 'QUOT-Z1' then gcd_quantity else 0 end gcd_over100k_quote,
+case when trim(gcd_sku) = 'PLIN-PS' then gcd_quantity else 0 end gcd_priced_msg,
+case when trim(gcd_sku) = 'PLIN-UP' then gcd_quantity else 0 end gcd_unpriced_msg
+from gp_contract_detl_j
+where month(add_months(gcd_timestamp, -1)) = $MONTH
+and year(gcd_timestamp) = $YEAR
+and trim(gcd_sku) in ('OTCDNASD','QUOT-PS','QUOT-UP','QUOT-Z1','PLIN-PS','PLIN-UP'))
+group by 1,2 
+
+
+#get last day of month
+cal 12 2011 | egrep -v '^$' | tail -1 | awk '{ print $NF }'
+
+===Query for Pass Thru Report===
+select mmid as mktmkr_mmid
+, replace(max(decode(num, 1, cemail))||decode(max(decode(num, 2, cemail)),null,'','; '||max(decode(num, 2, cemail))) 
+||decode(max(decode(num, 3, cemail)),null,'',';'||max(decode(num, 3, cemail))) 
+||decode(max(decode(num, 4, cemail)),null,'',';'||max(decode(num, 4, cemail))) 
+||decode(max(decode(num, 5, cemail)),null,'',';'||max(decode(num, 5, cemail))) 
+||decode(max(decode(num, 6, cemail)),null,'',';'||max(decode(num, 6, cemail)))
+||decode(max(decode(num, 7, cemail)),null,'',';'||max(decode(num, 7, cemail)))
+||decode(max(decode(num, 8, cemail)),null,'',';'||max(decode(num, 8, cemail)))
+||decode(max(decode(num, 9, cemail)),null,'',';'||max(decode(num, 9, cemail)))
+||decode(max(decode(num, 10, cemail)),null,'',';'||max(decode(num, 10, cemail))), ' ', '') as mktmkr_email 
+from 
+(select a.mmid, a.cemail, count(*) num
+from 
+(select mmid, cemail
+from (SELECT a.mktmkr_mmid mmid
+, b.mktmkrloc_cemail cemail, mktmkrloc_id
+FROM informix.market_maker a
+, informix.mkt_mkr_location b
+where a.mktmkr_id = b.mktmkrloc_mktmkr
+and nvl(b.mktmkrloc_cemail,'') != ''
+union
+SELECT a.mktmkr_mmid mmid
+, b.mktmkrloc_email email, mktmkrloc_id
+FROM informix.market_maker a
+, informix.mkt_mkr_location b
+where a.mktmkr_id = b.mktmkrloc_mktmkr
+and nvl(b.mktmkrloc_email,'') != '')
+where mktmkrloc_id in (select tr_mktmkrloc
+                from trader, trader_entitlement
+                where tr_id = te_trader_track_id
+                   and te_status = 1 and te_typeofService = 1)) a,
+(select mmid, cemail
+from (SELECT a.mktmkr_mmid mmid
+, b.mktmkrloc_cemail cemail, mktmkrloc_id
+FROM informix.market_maker a
+, informix.mkt_mkr_location b
+where a.mktmkr_id = b.mktmkrloc_mktmkr
+and nvl(b.mktmkrloc_cemail,'') != ''
+union
+SELECT a.mktmkr_mmid mmid
+, b.mktmkrloc_email email, mktmkrloc_id
+FROM informix.market_maker a
+, informix.mkt_mkr_location b
+where a.mktmkr_id = b.mktmkrloc_mktmkr
+and nvl(b.mktmkrloc_email,'') != '')
+where mktmkrloc_id in (select tr_mktmkrloc
+                from trader, trader_entitlement
+                where tr_id = te_trader_track_id
+                   and te_status = 1 and te_typeofService = 1)) b
+where a.cemail <= b.cemail
+and a.mmid = b.mmid
+group by 1,2)
+group by 1
+order by 1
+
+js-export --uris /FolderA --repository-permissions --role-users --output-zip x.zip --skip-access 
+
+
+
+
+# Changing timestamps in MD database
+select *
+from dev.mdc_md_customer a
+where account_id = 'T1MSSB ANG'
+and version_start_dt = (select max(version_start_dt) from dev.mdc_md_customer b
+where account_id = a.account_id
+and version_start_dt < '2011-04-15')
+
+select *
+from dev.mdc_md_customer a
+where account_id = 'T1MSSB ANG'
+and version_start_dt = (select min(version_start_dt) from dev.mdc_md_customer b
+where account_id = a.account_id
+and version_start_dt > '2011-04-15')
+
+
+### get row number for each group
+select a.tj_id, a.tj_tstamp,
+(select count(*)
+from trader_j b
+where a.tj_id = b.tj_id
+and a.tj_tstamp = b.tj_tstamp
+and a.tj_seq <= b.tj_tstamp
+and b.tj_timestamp >= '2011-12-06 00:00:00' and b.tj_timestamp <= '2011-12-06 23:59:59')
+from trader_j a
+where a.tj_timestamp >= '2011-12-06 00:00:00' and a.tj_timestamp <= '2011-12-06 23:59:59'
+
+
+
+
+IfThenElse(eqsdb.o_qap_waived_in = NULL,NULL,IfThenElse(eqsdb.o_qap_waived_in,'T','F'))
+
+
+
+eqs_recon|jzhang@pinkotc.com,dineshram@pinkotc.com,anna@pinkotc.com,mxu@pinkotc.com,tpwu@pinkotc.com,firoz@otcmarkets.com,yue@otcmarkets.com
+
+select secid, sum(trad_vol) as trad_vol, sum(trad_val) as trad_val, sum(aft_hr_vol) as aft_hr_vol, sum(aft_hr_val) as aft_hr_val
+from
+(select secid, 
+case when tradetime <= '16:00:00' then size else 0 end trad_vol, 
+case when tradetime <= '16:00:00' then price*size else 0 end trad_val,
+case when tradetime > '16:00:00' then size else 0 end aft_hr_vol, 
+case when tradetime > '16:00:00' then price*size else 0 end aft_hr_val
+from test.trade
+where tradedate = current_date) a
+group by 1
+
+
+select secid, tradingvenue,
+case when tradingvenue in ('AX', 'NY', 'AR') then 'TAPE_A' 
+when tradingvenue = 'NQ' 'TAPE_B' end sec_type
+from test.security
+where endtimestamp is null
+
+
+select distinct sm_exchange
+from sec_master
+
+
+select distinct markettiergroupid
+from test.security
+
+
+select *
+from sec_master
+where sm_exchange = 'F'
+
+select *
+from exch_tier_security
+
+select *
+from exch_tier_mast
+
+select sm_secid, 
+case when sm_exchange in ('A', 'B', 'X') then 'TYPE_1'
+when sm_exchange = 'O' then 'TYPE_4'
+when sm_exchange = 'F' and ets_tierid = 2 then 'TYPE_2'
+when sm_exchange = 'F' and ets_tierid = 3 then 'TYPE_3'
+else 'TYPE_UNKNOWN' end as tape_type,
+case when sd_sec_type in ('CORP', 'AGEN', 'ELN') then sd_sec_type else 'NON-BOND' end as sec_type,
+case when sd_investment_grade_in = 't' then 'INVEST_GRADE' else 'NONINVEST_GRADE' end as invest_grade
+from sec_master, exch_tier_security, sec_detl
+where sm_secid = ets_secid
+and sm_secid = sd_secid
+
+
+VERTICA VERSION
+===============
+select secid, 
+case when tradingvenue in ('AX', 'AR', 'NY') then 'TYPE_1'
+when tradingvenue in ('BP','GM','OB','PS') then 'TYPE_4'
+when tradingvenue = 'NQ' and nasdtiernr = 2 then 'TYPE_2'
+when tradingvenue = 'NQ' and nasdtiernr = 3 then 'TYPE_3'
+else 'TYPE_UNKNOWN' end as tape_type,
+case when sectype in ('CORP', 'AGEN', 'ELN') then sectype else 'NON-BOND' end as sec_type,
+case when investmentgradein = 't' then 'INVEST_GRADE' else 'NONINVEST_GRADE' end as invest_grade
+from dev.security
+where endtimestamp is null
+
+VERSION_1
+=============
+select a.secid, tape_type, sec_type, invest_grade, sum(trad_vol) as trad_vol, sum(trad_val) as trad_val, sum(aft_hr_vol) as aft_hr_vol, sum(aft_hr_val) as aft_hr_val
+from
+(select secid, 
+case when tradingvenue in ('AX', 'AR', 'NY') then 'TYPE_1'
+when tradingvenue in ('BP','GM','OB','PS') then 'TYPE_4'
+when tradingvenue = 'NQ' and nasdtiernr = 2 then 'TYPE_2'
+when tradingvenue = 'NQ' and nasdtiernr = 3 then 'TYPE_3'
+else 'TYPE_UNKNOWN' end as tape_type,
+case when sectype in ('CORP', 'AGEN', 'ELN', 'EQLK') then sectype else 'NON-BOND' end as sec_type,
+case when investmentgradein = 't' then 'INVEST_GRADE' else 'NONINVEST_GRADE' end as invest_grade
+from dev.security
+where endtimestamp is null) a
+left outer join
+(select secid, 
+case when tradetime <= '16:00:00' then size else 0 end trad_vol, 
+case when tradetime <= '16:00:00' then price*size else 0 end trad_val,
+case when tradetime > '16:00:00' then size else 0 end aft_hr_vol, 
+case when tradetime > '16:00:00' then price*size else 0 end aft_hr_val
+from test.trade
+where tradedate = '2012-01-23'
+and tradetype in (2,10)) b 
+on a.secid = b.secid
+group by 1,2,3,4
+
+VERSION_2
+==========
+select tape_type, sum(trad_vol) as trad_vol, sum(trad_val) as trad_val, sum(aft_hr_vol) as aft_hr_vol, sum(aft_hr_val) as aft_hr_val
+from
+(select secid, 
+case when tradingvenue in ('AX', 'AR', 'NY') and issuetype = 's' then 'Listed Equity Securities'
+when tradingvenue in ('BP','GM','OB','PS') and issuetype = 's' then 'Penny Stock Securities'
+when tradingvenue = 'NQ' and nasdtiernr = 2 and issuetype = 's' then 'NASDAQ National Market'
+when tradingvenue = 'NQ' and nasdtiernr = 3 and issuetype = 's' then 'NASDAQ SmallCap Market'
+when sectype in ('CORP') and investmentgradein = 't' then 'InvestGrade Corp Debt'
+when sectype in ('CORP') then 'NonInvestGrade Corp Debt'
+else 'TYPE_UNKNOWN' end as tape_type
+from dev.security
+where endtimestamp is null) a
+left outer join
+(select secid, 
+case when tradetime <= '16:00:00' then size else 0 end trad_vol, 
+case when tradetime <= '16:00:00' then price*size else 0 end trad_val,
+case when tradetime > '16:00:00' then size else 0 end aft_hr_vol, 
+case when tradetime > '16:00:00' then price*size else 0 end aft_hr_val
+from test.trade
+where tradedate = '2012-01-23'
+and tradetype in (2,10)) b 
+on a.secid = b.secid
+group by 1
+
+
+
+Groups:
+TYPE_1 NONBOND *
+TYPE_2 NONBOND NON_INVEST
+
+
+http://yue.dev.ps:9080/solr/ta_slave/select/?q=spm_name_lc:*bank*&sort=spm_name+asc,score+asc
+
+Compare the insides between 4gl program and qserv======================================
+\\thinkmate-6\Deptdata\Development\data_admin\Temporary
+
+Restart MySQL server with increased packet limit
+/etc/my.cnf # add max_allowed_packet=32M under [mysqld]
+
+export SCHEMA=dev
+export SOURCE_SERV_EQSPROD=Infdrv_eqs_prod_mu
+
+You can change the js.quartz.properties file under WEB-INF directory:
+report.scheduler.web.deployment.uri=http://www.yourdomain.com/jasperserver-pro
+
+pinklink|jzhang@pinkotc.com,dineshram@pinkotc.com,yue@otcmarkets.com,tp@otcmarkets.com
+export PATH=$PATH:/data/etl/scr
+
+UNIX Time: There can be milliseconds and seconds, if number seems a lot bigger, it could be in milliseconds.
+
+perl -pi -e 's/\$?\w+\.?\w+\@\w+.com/yue\@otcmarkets.com/g' yue.test
+
+select *
+from rpt_customer_info_temp
+
+
+select tradedate, count(*)
+from rpt_security_info_temp
+group by 1
+
+
+select *
+from security
+where symbol in ('TEST', 'PINK', 'QXQX')
+
+
+select *
+from test.hdy_holiday
+
+select *
+from test.quote
+where sequencenumber = 1
+and quotedatetime = '2012-06-22 7:29:59'
+
+select *
+from quote
+where secid is null
+
+
+select *
+from test.rpt_customer_info_temp
+where activity_dt = '2012-06-22'
+
+desc security
+
+select secid, 
+
+
+select secid, lastpx
+from pinklink
+where secid = 95390
+and sequencenum = (select max(sequencenum) from pinklink where secid = 95390)
+
+
+select *
+from tradeaggr
+where symbol = 'OTCM'
+and tradedate = '2012-06-12'
+
+Issues:
+eed_edgar_entity.business_description_tx is 255 characters, but the file has field length of 989 characters or more.
+eed_edgar_entity.deleted_in should be mapped to which field in the file?
+efd_edgar_financial.audited_in is a boolean, DCN, auditor_code, auditor_opinion, investor_policy, currency_code, period_length_code are under 50 characters
+several text fields in eed_edgar_entity have excessive space allocated, maybe consider making them smaller?
+
+
+JIRA DW-288
+1. tradeaggr_daily.sh only emails when job has error. Log file is in the zip file
+2.
+
+
+
+
+
+select 
+publishdate AS PublishDate,
+publishtime AS UpdateTime,
+'Inside' AS Action,
+bidprice,
+askprice,
+mmid AS MMID,
+userid AS User,
+CASE
+	WHEN insidetype = 1 THEN 'Quote Updated'
+	WHEN insidetype = 2 THEN 'Quote Added'
+	WHEN insidetype = 3 THEN 'Quote Deleted'
+	WHEN insidetype = 4 THEN 'Trader Open Quote'
+	WHEN insidetype = 5 THEN 'Trader Close Quote'
+END AS	'Reason for Inside',
+secid,symbol,asktimestamp,asktimestamp,traderid,tradername
+from quote
+where secid = 119243
+and sourcesystem='pink'
+and updatetype=6
+and publishdate between '2008-01-01' and '2009-06-26'
+and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2008-01-01' and '2009-06-26')
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Matt F. For Monthly MD Customer Data update unclassified===
+="update mdc_md_customer set customer_type_tx = '"&G2&"' where vendor_id = '"&A2&"' and account_id = '"&B2&"' and record_period_dt = '"&F2&"';"
+
+
+
+
+
+=== coming from Hoa's quote_quote2 job
+and eq_asktimestamp 
+and eq_bidtimestamp
+and eq_publishtime
+and eq_quotedatetime
+and eq_quotetime
+IfThenElse(not eq_bidtimestamp,' eq_bidtimestamp ',NULL) || 
+IfThenElse(not eq_asktimestamp,' eq_asktimestamp ',NULL) || 
+IfThenElse(not eq_publishtime,' eq_publishtime ',NULL) || 
+IfThenElse(not eq_quotedatetime,' eq_quotedatetime ',NULL) || 
+IfThenElse(not eq_quotetime,' eq_quotetime ',NULL) || 
+
+
+
+
+
+select plinkdate, sendermmid, count(*)
+from pinklink
+where plinkdate between '2012-06-01' and '2012-06-30'
+and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+and plinktime between '09:30:00' and '17:00:00'
+group by 1,2
+
+
+select plinkdate, receivermmid, count(*)
+from pinklink
+where plinkdate between '2012-06-01' and '2012-06-30'
+and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+and plinktime between '09:30:00' and '17:00:00'
+group by 1,2
+
+
+select publishdate, mmid, count(*)
+from quote
+where publishdate between '2012-06-01' and '2012-06-30'
+and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+and publishtime between '09:30:00' and '16:00:00'
+and updatetype < 4
+group by 1,2
+
+select sendermmid, plinkdate, avg(cnt_persecond)
+from
+	(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, count(*) as cnt_persecond
+	from pinklink
+	where plinkdate between '2012-06-01' and '2012-06-30'
+ 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+	and sendermmid not in ('TEST')
+	group by 1,2,3
+ 	order by 3 desc) a
+group by 1,2
+
+select receivermmid, plinkdate, avg(cnt_persecond)
+from
+	(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, count(*) as cnt_persecond
+	from pinklink
+	where plinkdate between '2012-06-01' and '2012-06-30'
+ 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+ 	and receivermmid not in ('TEST')
+	group by 1,2,3
+ 	order by 3 desc) a
+group by 1,2
+
+select mmid, publishdate, avg(cnt_persecond)
+from
+	(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, count(*) as cnt_persecond
+	from quote
+	where publishdate between '2012-06-01' and '2012-06-30'
+	and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and publishtime between '09:30:00' and '16:00:00'
+	and updatetype < 4
+	group by 1,2,3) a
+group by 1,2
+
+select mmid, publishdate, sectypedesc, avg(cnt_persecond)
+from
+	(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, sectypedesc, count(*) as cnt_persecond
+	from quote, security
+	where publishdate between '2012-06-01' and '2012-06-30'
+	and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and publishtime between '09:30:00' and '16:00:00'
+	and updatetype < 4
+ 	and quote.secid = security.secid
+  	and security.endtimestamp is null
+	group by 1,2,3,4) a
+group by 1,2,3
+
+select sendermmid, plinkdate, sectypedesc, avg(cnt_persecond)
+from
+	(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, sectypedesc, count(*) as cnt_persecond
+	from pinklink, security
+	where plinkdate between '2012-06-01' and '2012-06-30'
+ 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+	and sendermmid not in ('TEST')
+ 	and pinklink.secid = security.secid
+  	and security.endtimestamp is null
+	group by 1,2,3,4
+ 	order by 3 desc) a
+group by 1,2,3
+
+select receivermmid, plinkdate, sectypedesc, avg(cnt_persecond)
+from
+	(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, sectypedesc, count(*) as cnt_persecond
+	from pinklink, security
+	where plinkdate between '2012-06-01' and '2012-06-30'
+ 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+ 	and receivermmid not in ('TEST')
+  	and pinklink.secid = security.secid
+   	and security.endtimestamp is not null
+	group by 1,2,3,4
+ 	order by 3 desc) a
+group by 1,2,3
+
+
+
+
+
+
+====GOLDEN RULE=====
+AND plinkdate NOT IN (SELECT hdy_date FROM hdy_holiday WHERE hdy_date  BETWEEN '2012-06-01' AND '2012-06-30')
+AND secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+
+
+
+
+
+
+
+========================== VERSION 2==================================
+select 
+	case 
+ 		when c.publishdate is not null then c.publishdate 
+   		when a.plinkdate is not null then a.plinkdate 
+     	when b.plinkdate is not null then b.plinkdate
+      	when d.plinkdate is not null then d.plinkdate
+       	when e.plinkdate is not null then e.plinkdate
+        when f.publishdate is not null then f.publishdate
+        when g.publishdate is not null then g.publishdate
+        when h.plinkdate is not null then h.plinkdate
+        else i.plinkdate
+    end as date, 
+    case 
+    	when c.mmid is not null then c.mmid 
+     	when a.sendermmid is not null then a.sendermmid 
+      	when b.receivermmid is not null then b.receivermmid
+       	when d.sendermmid is not null then d.sendermmid
+        when e.receivermmid is not null then e.receivermmid
+        when f.mmid is not null then f.mmid
+        when g.mmid is not null then g.mmid
+        when h.sendermmid is not null then h.sendermmid
+        else i.receivermmid
+    end as mmid, 
+    TotalNumberofIncomingMessages, 
+    TotalNumberofOutgoingMessages, 
+    TotalNumberofQuoteUpdates, 
+    AverageNumberofIncomingMessagesPerSecond, 
+    AverageNumberofOutgoingMessagesPerSecond, 
+    AverageNumberofQuoteUpdatesPerSecond, 
+    AverageNumberofQuoteUpdatesPerSecondPerSecurityType, 
+    h.sectypedesc, 
+    AverageNumberofIncomingMessagesPerSecondPerSecurityType, 
+    i.sectypedesc, 
+    AverageNumberofOutgoingMessagesPerSecondPerSecurityType
+from
+	(select plinkdate, sendermmid, count(*) as TotalNumberofOutgoingMessages
+	from pinklink
+	where plinkdate between '2012-06-01' and '2012-06-30'
+	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+	group by 1,2) a 
+full outer join
+	(select plinkdate, receivermmid, count(*) as TotalNumberofIncomingMessages
+	from pinklink
+	where plinkdate between '2012-06-01' and '2012-06-30'
+	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and plinktime between '09:30:00' and '17:00:00'
+	group by 1,2) b 
+on a.plinkdate = b.plinkdate 
+and a.sendermmid = b.receivermmid
+full outer join
+	(select publishdate, mmid, count(*) as TotalNumberofQuoteUpdates
+	from quote
+	where publishdate between '2012-06-01' and '2012-06-30'
+	and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+	and publishtime between '09:30:00' and '16:00:00'
+	and updatetype < 4
+	group by 1,2) c 
+on b.receivermmid = c.mmid 
+and b.plinkdate = c.publishdate
+full outer join
+	(select sendermmid, plinkdate, avg(cnt_persecond) as AverageNumberofOutgoingMessagesPerSecond
+	from
+		(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, count(*) as cnt_persecond
+		from pinklink
+		where plinkdate between '2012-06-01' and '2012-06-30'
+	 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and plinktime between '09:30:00' and '17:00:00'
+		and sendermmid not in ('TEST')
+		group by 1,2,3
+	 	order by 3 desc) a
+	group by 1,2) d 
+on d.sendermmid = c.mmid 
+and d.plinkdate = c.publishdate
+full outer join
+	(select receivermmid, plinkdate, avg(cnt_persecond) as AverageNumberofIncomingMessagesPerSecond
+	from
+		(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, count(*) as cnt_persecond
+		from pinklink
+		where plinkdate between '2012-06-01' and '2012-06-30'
+	 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and plinktime between '09:30:00' and '17:00:00'
+	 	and receivermmid not in ('TEST')
+		group by 1,2,3
+	 	order by 3 desc) a
+	group by 1,2) e
+on e.plinkdate = d.plinkdate
+and e.receivermmid = d.sendermmid
+full outer join
+	(select mmid, publishdate, avg(cnt_persecond) as AverageNumberofQuoteUpdatesPerSecond
+	from
+		(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, count(*) as cnt_persecond
+		from quote
+		where publishdate between '2012-06-01' and '2012-06-30'
+		and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and publishtime between '09:30:00' and '16:00:00'
+		and updatetype < 4
+		group by 1,2,3) a
+	group by 1,2) f
+on f.mmid = d.sendermmid
+and f.publishdate = d.plinkdate
+full outer join
+	(select mmid, publishdate, sectypedesc, avg(cnt_persecond) as AverageNumberofQuoteUpdatesPerSecondPerSecurityType
+	from
+		(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, sectypedesc, count(*) as cnt_persecond
+		from quote a, (select secid, sectypedesc from security where endtimestamp is null) b
+		where publishdate between '2012-06-01' and '2012-06-30'
+		and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and publishtime between '09:30:00' and '16:00:00'
+		and updatetype < 4
+	 	and a.secid = b.secid
+		group by 1,2,3,4) a
+	group by 1,2,3) g
+on g.mmid = f.mmid
+and g.publishdate = f.publishdate
+full outer join
+	(select sendermmid, plinkdate, sectypedesc, avg(cnt_persecond) as AverageNumberofOutgoingMessagesPerSecondPerSecurityType
+	from
+		(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, sectypedesc, count(*) as cnt_persecond
+		from pinklink a, (select secid, sectypedesc from security where endtimestamp is null) b
+		where plinkdate between '2012-06-01' and '2012-06-30'
+	 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and plinktime between '09:30:00' and '17:00:00'
+		and sendermmid not in ('TEST')
+	 	and a.secid = b.secid
+		group by 1,2,3,4) a
+	group by 1,2,3) h
+on h.sendermmid = g.mmid
+and h.plinkdate = g.publishdate
+full outer join
+	(select receivermmid, plinkdate, sectypedesc, avg(cnt_persecond) as AverageNumberofIncomingMessagesPerSecondPerSecurityType
+	from
+		(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, sectypedesc, count(*) as cnt_persecond
+		from pinklink a, (select secid, sectypedesc from security where endtimestamp is null) b
+		where plinkdate between '2012-06-01' and '2012-06-30'
+	 	and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+		and plinktime between '09:30:00' and '17:00:00'
+	 	and receivermmid not in ('TEST')
+	  	and a.secid = b.secid
+		group by 1,2,3,4) a
+	group by 1,2,3) i
+on i.receivermmid = h.sendermmid
+and i.plinkdate = h.plinkdate
+and i.sectypedesc = h.sectypedesc
+
+
+
+
+
+
+
+
+====== VERSION 3=========
+select a.mmid, a.date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages, TotalNumberofQuoteUpdates, AverageNumberofOutgoingMessagesPerSecond, AverageNumberofIncomingMessagesPerSecond, AverageNumberofQuoteUpdatesPerSecond, sectypedesc, AverageNumberofQuoteUpdatesPerSecondPerSecurityType, AverageNumberofIncomingMessagesPerSecondPerSecurityType, AverageNumberofOutgoingMessagesPerSecondPerSecurityType
+from
+	(select a.mmid, date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages, TotalNumberofQuoteUpdates, AverageNumberofOutgoingMessagesPerSecond, AverageNumberofIncomingMessagesPerSecond, AverageNumberofQuoteUpdatesPerSecond
+	from
+		(select a.mmid, date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages, TotalNumberofQuoteUpdates, AverageNumberofOutgoingMessagesPerSecond, AverageNumberofIncomingMessagesPerSecond
+		from
+			(select a.mmid, date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages, TotalNumberofQuoteUpdates, AverageNumberofOutgoingMessagesPerSecond
+			from
+				(select a.mmid, date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages, TotalNumberofQuoteUpdates
+				from
+					(select a.mmid, date, TotalNumberofOutgoingMessages, TotalNumberofIncomingMessages
+					from
+						(select mmid, publishdate as date, TotalNumberofOutgoingMessages
+						from
+							(select mmid, publishdate 
+							from quote
+							where publishdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+							and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+							and publishtime between '09:30:00' and '16:00:00'
+							and updatetype < 4
+							union
+							select sendermmid, plinkdate
+							from pinklink
+							where plinkdate = '2012-06-01'
+							and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+							and plinktime between '09:30:00' and '17:00:00'
+							union
+							select receivermmid, plinkdate
+							from pinklink
+							where plinkdate = '2012-06-01'
+							and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+							and plinktime between '09:30:00' and '17:00:00') j 
+						left outer join
+							(select plinkdate, sendermmid, count(*) as TotalNumberofOutgoingMessages
+							from pinklink
+							where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+							and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+							and plinktime between '09:30:00' and '17:00:00'
+							group by 1,2) a 
+						on j.mmid = a.sendermmid
+						and j.publishdate = a.plinkdate) a
+					left outer join
+						(select plinkdate, receivermmid, count(*) as TotalNumberofIncomingMessages
+						from pinklink
+						where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'	
+						and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+						and plinktime between '09:30:00' and '17:00:00'
+						group by 1,2) b
+					on a.mmid = b.receivermmid
+					and a.date = b.plinkdate) a
+				left outer join
+					(select publishdate, mmid, count(*) as TotalNumberofQuoteUpdates
+					from quote
+					where publishdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+					and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+					and publishtime between '09:30:00' and '16:00:00'
+					and updatetype < 4
+					group by 1,2) c 
+				on a.mmid = c.mmid 
+				and a.date = c.publishdate) a
+			left outer join
+				(select sendermmid, plinkdate, avg(cnt_persecond) as AverageNumberofOutgoingMessagesPerSecond
+				from
+					(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, count(*) as cnt_persecond
+					from pinklink
+					where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+					and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+					and plinktime between '09:30:00' and '17:00:00'
+					and sendermmid not in ('TEST')
+					group by 1,2,3
+					order by 3 desc) a
+				group by 1,2) d 
+			on a.mmid = d.sendermmid
+			and a.date = d.plinkdate) a
+		left outer join
+			(select receivermmid, plinkdate, avg(cnt_persecond) as AverageNumberofIncomingMessagesPerSecond
+			from
+				(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, count(*) as cnt_persecond
+				from pinklink
+				where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+				and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+				and plinktime between '09:30:00' and '17:00:00'
+				and receivermmid not in ('TEST')
+				group by 1,2,3
+				order by 3 desc) a
+			group by 1,2) e
+		on e.plinkdate = a.date
+		and e.receivermmid = a.mmid) a
+	left outer join
+		(select mmid, publishdate, avg(cnt_persecond) as AverageNumberofQuoteUpdatesPerSecond
+		from
+			(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, count(*) as cnt_persecond
+			from quote
+			where publishdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+			and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+			and publishtime between '09:30:00' and '16:00:00'
+			and updatetype < 4
+			group by 1,2,3) a
+		group by 1,2) f
+	on f.mmid = a.mmid
+	and f.publishdate = a.date) a
+left outer join
+	(select 
+		case
+			when g.publishdate is not null then g.publishdate
+			when h.plinkdate is not null then h.plinkdate
+			else i.plinkdate
+		end as date, 
+		case 
+			when g.mmid is not null then g.mmid
+			when h.sendermmid is not null then h.sendermmid
+			else i.receivermmid
+		end as mmid, 
+		AverageNumberofQuoteUpdatesPerSecondPerSecurityType, 
+		case 	when g.sectypedesc is not null then g.sectypedesc
+		when h.sectypedesc is not null then h.sectypedesc
+		else i.sectypedesc end as sectypedesc,
+		AverageNumberofIncomingMessagesPerSecondPerSecurityType, 
+		AverageNumberofOutgoingMessagesPerSecondPerSecurityType
+	from
+		(select mmid, publishdate, sectypedesc, avg(cnt_persecond) as AverageNumberofQuoteUpdatesPerSecondPerSecurityType
+		from
+			(select publishdate, to_char(publishtime, 'HH:MI:SS'), mmid, sectypedesc, count(*) as cnt_persecond
+			from quote a, (select secid, sectypedesc from security where endtimestamp is null) b
+			where publishdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+			and publishdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+			and publishtime between '09:30:00' and '16:00:00'
+			and updatetype < 4
+			and a.secid = b.secid
+			group by 1,2,3,4) a
+		group by 1,2,3) g
+	full outer join
+		(select sendermmid, plinkdate, sectypedesc, avg(cnt_persecond) as AverageNumberofOutgoingMessagesPerSecondPerSecurityType
+		from
+			(select plinkdate, to_char(plinktime, 'HH:MI:SS'), sendermmid, sectypedesc, count(*) as cnt_persecond
+			from pinklink a, (select secid, sectypedesc from security where endtimestamp is null) b
+			where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+			and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+			and plinktime between '09:30:00' and '17:00:00'
+			and sendermmid not in ('TEST')
+			and a.secid = b.secid
+			group by 1,2,3,4) a
+		group by 1,2,3) h
+	on h.sendermmid = g.mmid
+	and h.plinkdate = g.publishdate
+	and h.sectypedesc = g.sectypedesc
+	full outer join
+		(select receivermmid, plinkdate, sectypedesc, avg(cnt_persecond) as AverageNumberofIncomingMessagesPerSecondPerSecurityType
+		from
+			(select plinkdate, to_char(plinktime, 'HH:MI:SS'), receivermmid, sectypedesc, count(*) as cnt_persecond
+			from pinklink a, (select secid, sectypedesc from security where endtimestamp is null) b
+			where plinkdate = '2012-06-01' --between '2012-06-01' and '2012-06-30'
+			and plinkdate not in (select hdy_date from hdy_holiday where hdy_date between '2012-06-01' and '2012-06-30')
+			and plinktime between '09:30:00' and '17:00:00'
+			and receivermmid not in ('TEST')
+			and a.secid = b.secid
+			group by 1,2,3,4) a
+		group by 1,2,3) i
+	on i.receivermmid = h.sendermmid
+	and i.plinkdate = h.plinkdate
+	and i.sectypedesc = h.sectypedesc) b
+on a.mmid = b.mmid
+and a.date = b.date
+
+
+
+
+
+==== presence_j to presence_audit =====
+select a.tj_id, a.tj_trader_id, max(b.tj_date)
+from trader_j a, 
+	(select tj_id, date(tj_tstamp) as tj_date, max(tj_seq) as tj_seq
+	from trader_j
+	group by 1,2) b
+where a.tj_id = b.tj_id
+and a.tj_seq = b.tj_seq
+and date(a.tj_tstamp) = b.tj_date
+group by 1,2
+
+
+select a.mmj_id, a.mmj_mmid, max(b.mmj_date)
+from market_maker_j a,
+	(select mmj_id, date(mmj_timestamp) as mmj_date, max(mmj_tstamp) as max_timestamp
+	from market_maker_j
+	group by 1,2) b
+where a.mmj_id = b.mmj_id
+and date(a.mmj_timestamp) = b.mmj_date
+and mmj_tstamp = b.max_timestamp
+group by 1,2
+
+
+set isolation to dirty read;
+select a.pj_trader_track_id, b.tj_trader_id, max(b.tj_date) --pj_trader_track_id,pj_connected,pj_vl_vendorlocid,pj_timestamp, tj_trader_id, mktmkr_mmid
+from presence_j a 
+left outer join
+	(select a.tj_id, a.tj_trader_id, max(b.tj_date) as tj_date
+	from trader_j a, 
+		(select tj_id, date(tj_tstamp) as tj_date, max(tj_seq) as tj_seq
+		from trader_j
+		group by 1,2) b
+	where a.tj_id = b.tj_id
+	and a.tj_seq = b.tj_seq
+	and date(a.tj_tstamp) = b.tj_date
+	group by 1,2) b
+on a.pj_trader_track_id = b.tj_id
+and a.pj_timestamp >= b.tj_date
+group by 1,2;
+
+
+==== Query for unclassified customer ====
+select distinct b.vendor_id, b.account_id, b.customer_name1_tx, b.customer_name2_tx, a.product_cd, b.record_period_dt
+from
+(select *
+from mco_md_customer_order
+where record_period_dt >= '2012-02-01'
+and product_cd IN ('MDSP2','MDSP2D','MDSP2T','PINKL2PT','MDSP1','MDSP1D','MDSP1T','PINKL1PT') ) a,
+(select *
+from mdc_md_customer
+where record_period_dt >= '2012-02-01'
+and customer_type_tx is null) b
+where a.vendor_id = b.vendor_id
+and a.account_id = b.account_id
+and a.record_period_dt = b.record_period_dt
+
+
+ETL triggers report jobs to run
+reports are scheduled to run automatically
+
+
+==== Vertica 6.0 Testing ===
+- you can no longer populate a bit field with 'T' or 'F' in DMExpress
+- you have to store passwords in a variable when connecting to Vertica 6.0 from DMExpress
+
+
+=== Tasks ===
+- store dmexpress statistics to a table. 
+- look into why wombat_prod_dr_recon ETL job returns exception
+
+
+
+
+http://services.dx.com/forms/viewresults.aspx?formkey=81056EEA099EDDEC
+SKU: 3763
+
+
+
+===== JasperServer Upgrade 4.5 to 4.7 =====
+1. Backup jasperserver-pro webapp in tomcat
+2. Delete jasperserver-pro webapp in tomcat after backup
+3. Backup MySQL database
+	mysqldump --user=root --password=<password> --host=127.0.0.1 jasperserver > js-db-4.5-dump.sql
+4. Download WAR zip file, extract it and copy buildomatic configuration
+cp <old-js-install>/buildomatic/default_master.properties <new-js-install>/buildomatic/
+cp <old-js-install>/buildomatic/conf_source/db/mysql/jdbc/mysql*.jar <new-js-install>/buildomatic/conf_source/db/mysql/jdbc
+5. Clear tomcat temp file /usr/share/tomcat6/temp/
+6. Backup tomcat directories as well
+7. Use the updated SQL script in perf environment in <install-dir>/buildomatic/install_resources/sql/mysql/upgrade-mysql-4.5.0-4.7.0-pro.sql
+8. A defect in 4.7 where we have to run this SQL to update save_to_repository field to TRUE
+UPDATE JIReportJobRepoDest SET save_to_repository = TRUE
+	
+
+# use this query for quote changedata informix side
+select a.sj_nqbsecid,a.sj_timestamp version_start_dt,
+(select nvl(min(b.sj_timestamp),sysdate) from security_j b 
+where b.sj_nqbsecid = a.sj_nqbsecid 
+and b.sj_timestamp >= '$FROMDATE' and a.sj_timestamp <='$TODATE'
+and b.sj_timestamp > a.sj_timestamp) version_end_dt,
+a.sj_piggyback, 'OTHER' as updatetype
+from security_j a
+where a.sj_timestamp >= '$FROMDATE' and a.sj_timestamp <='$TODATE'
+union
+select a.sj_nqbsecid, to_date('$FROMDATE') as start_dt, to_date('$TODATE') as end_dt, a.sj_piggyback, 'TYPE4' as updatetype
+from security_j a,
+	(select sj_nqbsecid, max(sj_seq) as sj_seq
+	from security_j
+	where sj_timestamp < '$FROMDATE'
+	and date(sj_timestamp) not in (select hd_date from secmstr@ps_prod_tcp:holidays)
+	group by 1) b
+where a.sj_nqbsecid = b.sj_nqbsecid
+and a.sj_seq = b.sj_seq	
+
+
+
+
+
+====TCB MD Database
+filter out anything from last year, get this month and next month files
+grep Jun debug2.txt | awk '{ if($7 > 10 && $8 != '2011'){print $0}}'
+
+
+PINKFIX MAILLIST: yue@otcmarkets.com,ITManagement@otcmarkets.com,techsupport@otcmarkets.com,subscriberservices@otcmarkets.com,fix_alerts@otcmarkets.com,TSManagement@otcmarkets.com 
+
+
+
+select *
+from dev.eec_edgar_entity_company_relation
+
+
+truncate table test.efd_edgar_financial;
+truncate table test.erd_edgar_ratio;
+truncate table test.eed_edgar_entity;
+
+
+
+truncate table test.eec_edgar_entity_company_relation;
+
+
+
+desc test.eed_edgar_entity
+
+
+
+select count(*)
+from desc test.efd_edgar_financial
+
+
+http://subversion.ps/repo/dw/trunk/DB%20Script/fidessa.scr
+
+
+=======check vertica system tables ============
+ v_monitor | column_storage                | system | Information on the amount of disk storage used by each column of each projection on each node.
+ v_monitor | configuration_parameters      | system | Configuration Parameters information
+ v_monitor | current_session               | system | Information on current Session
+ v_monitor | data_collector                | system | Statistics on all Usage Data Collector logs
+ v_monitor | database_snapshots            | system | Information on stored database snapshots
+ v_monitor | delete_vectors                | system | Information on delete vectors
+ v_monitor | disk_resource_rejections      | system | Disk Resource Rejection Summarizations
+ v_monitor | disk_storage                  | system | Disk usage information
+ v_monitor | event_configurations          | system | Current Event configuration
+ v_monitor | execution_engine_profiles     | system | Per EE operator profiling information
+ v_monitor | host_resources                | system | Per host profiling information
+ v_monitor | load_streams                  | system | Load metrics for each load stream on each node.
+ v_monitor | locks                         | system | Lock grants and requests for all nodes
+ v_monitor | node_resources                | system | Per node profiling information
+ v_monitor | partitions                    | system | Partition metadata
+ v_monitor | projection_refreshes          | system | Historical and current projection refreshes
+ v_monitor | projection_storage            | system | Storage information on each Projection
+ v_monitor | query_metrics                 | system | Summarized query information
+ v_monitor | query_profiles                | system | Query Profiling
+ v_monitor | resource_acquisitions         | system | Resources in use by queries
+ v_monitor | resource_acquisitions_history | system | Resources used by completed queries
+ v_monitor | resource_pool_status          | system | Resource pool usage Information
+ v_monitor | resource_queues               | system | Queries waiting to acquire resources
+ v_monitor | resource_rejections           | system | Resource Rejection Summarizations
+ v_monitor | resource_usage                | system | Resource usage Information
+ v_monitor | session_profiles              | system | Per session profiling information
+ v_monitor | sessions                      | system | Information on each Session
+ v_monitor | storage_containers            | system | Information on each storage container
+ v_monitor | strata                        | system | Information of strata used in Tuple Mover, one row per stratum
+ v_monitor | strata_structures             | system | Information of strata structures used in Tuple Mover, one row per strata structure
+ v_monitor | system                        | system | System level information
+ v_monitor | tuple_mover_operations        | system | Information about (automatic) Tuple Mover
+ v_monitor | wos_container_storage         | system | Storage information on WOS allocator
+=============================================
+
+
+
+#### JasperReport freeze panel
+<property name="net.sf.jasperreports.export.xls.freeze.row" value="3"/>
+
+
+
+
+
+
+select * from history_act_master 
+where ha_print_date in (select max(a.ha_print_date) from history_act_master a)
+
+
+
+
+
+SELECT sm_secid, sm_issue_symbol, sm_issue_name
+     FROM broker_master, aa, sec_master
+    WHERE bm_bb = "B"
+      AND bm_broker_symbol = aa.ha_broker_symbol
+      AND aa.ha_bbtime = "E"
+      AND aa.ha_secid = sm_secid
+      AND sm_qualified = "Q"
+      AND bm_broker_symbol = arg   
+      AND sm_secid not in (select ss_secid from spec_sec where ss_type = "T") 
+    ORDER BY sm_issue_name
+	
+	
+	
+=== get_pos1_NITE_to_UBSS.scr READY FOR PROD ==========================================
+select '(1) Total order sent:                   ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate = 1
+union
+select '(2) Total order sent with position 1:   ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate = 1
+and orderposition = 1
+union
+select '(3) Total position 1 order executed (full or partial):' || count(distinct orderid)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate in (2,3)
+and orderposition = 1
+union
+select '(4) Total position 1 order declined:                  ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate = 6
+and orderposition = 1
+union
+select '(5) Total position 1 order timed out:                 ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate = 4
+and orderposition = 1
+union
+select '(6) Total position 1 order countered:                 ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate = 7
+and orderposition = 1
+union
+select '(7) Average exec time in (date hh:mm:ss) format:' || avg(plinkdatetime - starttime)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate in (2,3)
+and orderposition = 1
+union
+select '(8) Total execution with respond time > 30s:    ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and sendermmid = 'NITE'
+and receivermmid = 'UBSS'
+and orderstate in (2,3)
+and orderposition = 1
+and (plinkdatetime - starttime) > '00:00:30'
+order by 1
+================================================================================================
+
+
+
+==== get_pos1_UBSS_to_NITE.scr READY FOR PROD ====================================================
+select '(1) Total order sent:                   ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate = 1
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+union
+select '(2) Total order sent with position 1:   ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate = 1
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(3) Total position 1 order executed (full or partial):' || count(distinct orderid)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate in (2,3)
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(4) Total position 1 order declined:                  ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate = 6
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(5) Total position 1 order timed out:                 ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate = 4
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(6) Total position 1 order countered:                 ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate = 7
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(7) Average exec time in (date hh:mm:ss) format:' || avg(plinkdatetime - starttime)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate in (2,3)
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+union
+select '(8) Total execution with respond time > 30s:    ' || count(*)
+from pinklink
+where plinkdate = '2012-10-15'
+and orderstate in (2,3)
+and sendermmid = 'UBSS'
+and receivermmid = 'NITE'
+and orderposition = 1
+and (plinkdatetime - starttime) > '00:00:30'
+order by 1
+================================================================================================
+
+
+
+
+
+==== ems_monthly_stat.scr =======================================================================
+-- OTC Link Execution Statistics
+select count(*) as total_order, sum(executedqty) as shares, sum(executedqty*lastpx) as dollar, avg(plinkdatetime - starttime) as avg_time
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and orderstate in (2,3)
+and secexchange = 'OP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+-- OTCBB Execution Statistics
+select count(*) as total_order, sum(executedqty) as shares, sum(executedqty*lastpx) as dollar, avg(plinkdatetime - starttime) as avg_time
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and orderstate in (2,3)
+and secexchange = 'OBP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+
+select count(*)
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and orderstate = 1
+and secexchange = 'OBP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+
+select count(*)
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and orderstate in (4,5,6)
+and originalqty = remainingqty
+and secexchange = 'OBP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+--OTC Link Liability 1 Execution Statistics
+select count(*) as total_order, sum(executedqty) as shares, sum(executedqty*lastpx) as dollar, avg(plinkdatetime - starttime) as avg_time
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and isliableind = 1
+and orderposition = 1
+and orderstate in (2,3)
+and secexchange = 'OP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+-- OTC Dually Liability 1 Execution Statistics
+select count(*) as total_order, sum(executedqty) as shares, sum(executedqty*lastpx) as dollar, avg(plinkdatetime - starttime) as avg_time
+from pinklink
+where plinkdate between '2012-09-01' and '2012-09-30'
+and isliableind = 1
+and orderposition = 1
+and orderstate in (2,3)
+and secexchange = 'OBP'
+and (sendermmid not in ('PINK','TEST','NQB','QXQX') or receivermmid not in ('PINK','TEST','NQB','QXQX'))
+and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+
+====================================================================================================================
+
+
+
+
+
+
+======== FINRA Monthly Report ================================================================================
+select tr_year, tr_month, mmid, symbol, sum(share_vol) share_vol, sum(dollar_vol) dollar_vol, count(sequencenum) trade_cnt
+from
+	(select	initiatormmid as mmid, symbol, executedqty as share_vol, (executedqty*lastpx) as dollar_vol, sequencenum, extract(month from plinkdate) as tr_month, extract(year from plinkdate) as tr_year
+	from pinklink
+	where orderstate in (2,3)
+	and plinkdate between $P{FROMDATE} and $P{TODATE}
+	and plinkdate not in (select hdy_date from hdy_holiday)
+	and initiatormmid not in ('PINK', 'TEST', 'NQB', 'QXQX')
+	and respondentmmid not in ('PINK', 'TEST', 'NQB', 'QXQX')
+	and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+	union all
+	select respondentmmid as mmid, symbol, executedqty as share_vol, (executedqty*lastpx) dollar_vol, sequencenum, extract(month from plinkdate) as tr_month, extract(year from plinkdate) as tr_year
+	from pinklink
+	where orderstate in (2,3)
+	and plinkdate between $P{FROMDATE} and $P{TODATE}
+	and plinkdate not in (select hdy_date from hdy_holiday)
+	and initiatormmid not in ('PINK', 'TEST', 'NQB', 'QXQX')
+	and respondentmmid not in ('PINK', 'TEST', 'NQB', 'QXQX')
+	and secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')) a
+group by 1,2,3,4
+order by 1,2
+
+================================================================================================================
+
+
+
+
+
+===== finra_otc.sh ===============================================================================================
+select extend(qh_publishtime_ts, year to fraction(3)) as quote_time, qh_update_type update_type, qh_symbol symbol, qh_shortname issue, qh_bidpricetype bidtype, qh_bidprice bidprice, qh_bidquantity bidqty, qh_askpricetype asktype, qh_askprice askprice, qh_askquantity askqty, qh_unsolicited unsolicited, qh_mmid, qh_trid, ' ', qh_open, qh_upd_seqnum
+from eqs_prod@eqs_readonly:t_quote_history
+where qh_timestamp >= today 
+and qh_timestamp < today + 1
+and qh_publishtime_ts  < today + 1
+and qh_update_type <= 4
+and qh_nqbsecid not in (select ss_secid as secid from spec_sec where ss_type = 'T' union select sm_secid as secid from sec_master where sm_issue_type = 'b')
+union all
+select extend(qh_tstamp, year to fraction(3)) as quote_time, qh_update_type update_type, qh_symbol symbol, qh_shortname issue, qh_bidpricetype bidtype, qh_bidprice bidprice, qh_bidquantity bidqty, qh_askpricetype asktype, qh_askprice askprice, qh_askquantity askqty, qh_unsolicited unsolicited, NULL::varchar, NULL::varchar,
+case
+	when qh_inside_type = 1 then 'Quote Updated'
+	when qh_inside_type = 2 then 'Quote Added'
+	when qh_inside_type = 3 then 'Quote Deleted'
+	when qh_inside_type = 4 then 'Trader Open Quote'
+	when qh_inside_type = 5 then 'Trader Close Quote'
+end,
+qh_open, qh_upd_seqnum
+from eqs_prod@eqs_readonly:t_quote_history
+where qh_tstamp >= today 
+and qh_tstamp < today + 1
+and qh_update_type = 6
+and qh_nqbsecid not in (select ss_secid as secid from spec_sec where ss_type = 'T' union select sm_secid as secid from sec_master where sm_issue_type = 'b')
+
+====================================================================================================================
+
+
+
+
+
+========= month_tier.sh ===============================================================================================
+select	
+		case
+			when tradingvenue = 'PS' then 'PinkSheet Issue Count'
+		 	when tradingvenue = 'BP' then 'Dually Quoted Issue Count'
+		  	when otcmarkettierid = 30 then 'Grey Market Issue Count'
+		end as category, count(*)
+from 	security
+where 	(secid, eventtimestamp) in 
+		(select secid, max(eventtimestamp)
+		from security
+		where date(eventtimestamp) <= '2012-09-30'
+		group by 1)
+and 	issuetype = 's'
+and 	tradingvenue in ('PS', 'OB', 'BP', 'GM')
+and 	status = 'A'
+and 	caveatemptorflag = 'Y'
+group by 1
+
+
+
+=== http://subversion.ps/repo/dw/trunk/DB%20Script/month_liability.sh =========================
+Runs twice a month, 1st and 16th. If rundate is 1st, then run previous month from 16th to end of month. If rundate is 16th, run current month from 1st to 15th.
+
+
+
+
+
+============= liability.scr ======
+SELECT 	orderid, sendertraderid, sendermmid, receivertraderid, receivermmid, symbol, shortname,
+		CASE
+  			WHEN buysell = 1 THEN 'Buy'
+     		WHEN buysell = 2 THEN 'Sell'
+       	END AS buysell,
+        originalqty, price, starttime,
+        CASE
+        	WHEN orderstate = 4 THEN 'Expired'
+         	WHEN orderstate = 6 THEN 'Declined'
+       	END AS orderstate,
+        endtime
+FROM	pinklink
+WHERE	plinkdate = '2012-10-18'
+AND 	orderposition = 1
+AND 	originalqty = remainingqty
+AND 	receivermmid = 'UBSS'
+AND 	isliableind = 1
+AND 	orderstate IN (4,6)
+ORDER BY 1
+
+
+
+========= history_act_master ==============
+select distinct secid
+from quote
+where mmid = 'BMAS'
+and publishdate = '2012-10-01'
+and (bidprice > 0 or askprice > 0)
+and updatetype <= 4
+
+
+
+
+
+
+
+======= Fields and Tables Needed ===============
+notforeign.scr					sec_master.sm_status
+month_mm_activity.4gl			serv_daily_loc.sa_date, history_act_master.ha_secid, history_act_master.ha_broker_symbol, history_act_master.ha_print_date, history_act_master.ha_bid, history_act_master.ha_ask, history_act_master.ha_bbtime
+month_tier_venue_report.4gl		possibly just need sm_status. monthly_wtf.wtf_trade_count, monthly_wtf.wtf_secid, monthly_wtf.wtf_date, history_price.hp_volume, history_price.hp_last_price, history_price.hp_date, history_price.secid, (use trade table where type = 2)
+finra_otc.sh					t_quote_history.qh_publishtime_ts
+(MD)ubs.scr							category_security.cs_catid
+
+
+sm_report_flag for security table in eqs_prod
+
+
+substitute for getting tradecount from monthly_wtf
+select tradedate, secid, count(*)
+from trade
+where tradedate = '2012-10-01'
+and tradetype in (2,10)
+group by 1,2
+order by 1,2
+
+history price is just aggregation of trade table type 2 and 10
+
+
+
+===== shwb.scr ===========================
+select symbol, securityname
+from security
+where tradingvenue = 'PS'
+and issuetype = 's'
+and status != 'D'
+and '2012-10-26 06:00:00' between eventtimestamp and nvl(endtimestamp, '9999-12-31 00:00:00')
+order by 2
+
+
+
+shwb.ftp
+DATE_STR=`date +%m%d%y`
+echo "${DATE_STR}"
+ftp -nv << EOD
+open ftp1
+user shwb shwb123
+binary
+put /prod/trn/shwb.txt shwb_${DATE_STR}.txt
+EOD
+
+
+
+
+
+ogru.sh ===================
+DATE_STR=`date +%m%d`
+echo "${DATE_STR}"
+ftp -nv << EOD
+open ftp1
+user ogru ogru123
+binary
+put /prod/trn/ogru.out ogru_${DATE_STR}
+EOD
+
+
+
+fidessa.sh ====================
+DATE_STR=`date +%m%d%y`
+#DATE_STR=072905
+echo "${DATE_STR}"
+ftp -nv << EOD
+open ftp1
+user fidessa fid112
+binary
+put /prod/trn/fidessa.out fidessa_${DATE_STR}.txt
+bye
+EOD
+
+
+
+nite.scr =======================
+select 	symbol, securityname, cusip
+from 	security
+where 	secid in (	select 	distinct secid
+					from 	quote
+					where 	publishdate = '2012-10-25'
+					and 	unsolicitedflag = 1)
+and		tradingvenue = 'PS'
+and		status != 'D'
+and		issuetype = 's'
+and 	'2012-10-25 23:00:00' between eventtimestamp and nvl(endtimestamp, '9999-12-31 00:00:00')
+and		secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+order by 2
+
+
+
+
+
+============== OTC Daily Trade Acitivity Total Report =============================
+select 	a.plinkdate, issues, trade_count, avg_vol, avg_dollar, total_vol, total_dollar, mmid_count
+from
+		(select	plinkdate, count(sequencenum) as trade_count, avg(executedqty) as avg_vol, avg(executedqty*lastpx) as avg_dollar, sum(executedqty) as total_vol, sum(executedqty*lastpx) as total_dollar
+		from	pinklink
+		where	plinkdate between '2012-01-01' and '2012-11-15'
+		and		plinkdate not in (select hdy_date from hdy_holiday)
+		and		orderstate in (2,3)
+		and		sendermmid not in ('TEST', 'QXQX', 'PINK', 'NQB')
+		and		receivermmid not in ('TEST', 'QXQX', 'PINK', 'NQB')
+		and		secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+		group by 1) a,
+		(select 	plinkdate, count(distinct secid) as issues
+		from 	security s, (select distinct plinkdate from pinklink where plinkdate not in (select hdy_date from hdy_holiday) and plinkdate between '2012-01-01' and '2012-11-15') p
+		where 	status = 'A'
+		and		issuetype = 's'
+		and		tradingvenue in ('PS', 'BP', 'OB')
+		and		secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+		and 	plinkdate between eventtimestamp and nvl(endtimestamp, '9999-12-31 00:00:00')
+		group by 1) b,
+		(select	publishdate, count(distinct mmid) as mmid_count
+		from	quote
+		where	publishdate between '2012-01-01' and '2012-11-15'
+		and		secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+		and		publishdate not in (select hdy_date from hdy_holiday)
+		and		sourcesystem = 'pink'
+		group by 1) c
+where	a.plinkdate = b.plinkdate
+and		b.plinkdate = c.publishdate
+
+
+
+
+
+============== OTC Daily Trade Activity Report =======================
+	SELECT 	
+			a.tier,
+			b.issues,
+			a.trade_count as '# of Trades',
+			a.avg_vol as 'Avg Trade Size',
+			a.avg_dollar as 'Avg Trade Dol',
+			a.total_vol as 'Volume',
+			a.total_dollar as 'Dol Volume',
+			c.mmid_count as "Avg # MM's",
+   			d.tier_mmid_cnt as 'tiermmid',
+      		d.tier_abbr as 'tier_abbrv',
+      		e.total_mmid_cnt as 'total_mmid'
+	FROM
+			(SELECT	plinkdate, 
+					otcmarkettier AS tier,
+					CASE 
+			  			WHEN otcmarkettier LIKE 'OTCQX%' THEN 'OTCQX' 
+			  			WHEN otcmarkettier LIKE 'OTC Pink%' THEN 'OTC Pink' 
+			  			ELSE otcmarkettier 
+				  	END AS tier_abbrv, 
+					COUNT(sequencenum) AS trade_count, 	
+					AVG(executedqty) AS avg_vol, 
+					AVG(executedqty*lastpx) AS avg_dollar, 
+					SUM(executedqty) AS total_vol, 
+					SUM(executedqty*lastpx) AS total_dollar
+			FROM 	pinklink p, security s
+			WHERE	plinkdate BETWEEN '2012-11-15' AND '2012-11-15'
+					AND plinkdate NOT IN (SELECT hdy_date from hdy_holiday)
+					AND orderstate IN (2,3)
+					AND sendermmid NOT IN ('TEST', 'QXQX', 'PINK', 'NQB')
+					AND receivermmid NOT IN ('TEST', 'QXQX', 'PINK', 'NQB')
+					AND p.secid = s.secid
+					AND plinkdate BETWEEN s.eventtimestamp AND nvl(s.endtimestamp, '9999-12-31 00:00:00')
+					AND p.secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+					AND s.status = 'A'
+					--AND s.otcmarkettierid > 0
+					AND tradingvenue in ('PS', 'BP', 'OB')	
+					AND s.issuetype = 's'
+			GROUP BY 1,2,3) a,
+			
+			(SELECT	plinkdate,
+					otcmarkettier AS tier,
+					CASE 
+						WHEN otcmarkettier LIKE 'OTCQX%' THEN 'OTCQX' 
+						WHEN otcmarkettier LIKE 'OTC Pink%' THEN 'OTC Pink' 
+						ELSE otcmarkettier 
+					END AS tier_abbrv,
+					COUNT(DISTINCT secid) AS issues
+			FROM 	security s, (SELECT DISTINCT plinkdate FROM pinklink WHERE plinkdate NOT IN (SELECT hdy_date FROM hdy_holiday) AND plinkdate BETWEEN '2012-11-15' AND '2012-11-15') p
+			WHERE 	plinkdate BETWEEN eventtimestamp AND nvl(endtimestamp, '9999-12-31 00:00:00')
+					AND secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+					AND status = 'A'
+					--AND otcmarkettierid > 0
+					AND issuetype = 's'
+					AND tradingvenue in ('PS', 'BP', 'OB')				
+			GROUP BY 1,2,3) b,
+			
+			(SELECT 	publishdate,
+					tier,
+					tier_abbrv,
+					COUNT(DISTINCT mmid) AS mmid_count
+			FROM 	(SELECT 	DISTINCT 
+							publishdate,
+							secid,
+							mmid
+					FROM 	quote
+					WHERE 	publishdate BETWEEN '2012-11-15' AND '2012-11-15'
+							AND secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+							AND publishdate NOT IN (SELECT hdy_date FROM hdy_holiday)
+							AND sourcesystem = 'pink'
+					) c,	       
+					(SELECT 	DISTINCT 
+							plinkdate,
+							secid, 
+							otcmarkettier AS tier,
+							CASE 
+								WHEN otcmarkettier LIKE 'OTCQX%' THEN 'OTCQX' 
+								WHEN otcmarkettier LIKE 'OTC Pink%' THEN 'OTC Pink' 
+								ELSE otcmarkettier 
+							END AS tier_abbrv
+					  FROM	security s, (SELECT DISTINCT plinkdate FROM pinklink WHERE plinkdate NOT IN (SELECT hdy_date FROM hdy_holiday) AND plinkdate BETWEEN '2012-11-15' AND '2012-11-15') p
+					  WHERE   plinkdate BETWEEN eventtimestamp AND nvl(endtimestamp, '9999-12-31 00:00:00')
+							AND secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+					  		AND status = 'A'
+					  		AND otcmarkettierid > 0
+							AND issuetype = 's'
+							AND tradingvenue IN ('PS', 'BP', 'OB')				
+					) b
+			WHERE 	c.publishdate = b.plinkdate
+					AND c.secid = b.secid
+			GROUP BY 1,2,3) c,
+   			(select	publishdate,
+					case
+						when otcmarkettier like 'OTCQX%' then 'OTCQX'
+			   			when otcmarkettier like 'OTC Pink%' then 'OTC Pink'
+			      		else otcmarkettier
+			        end as tier_abbr, count(distinct mmid) as tier_mmid_cnt
+			from	security s, quote q
+			where	publishdate between s.eventtimestamp and nvl(s.endtimestamp, '9999-12-31 00:00:00')
+			and		publishdate between '2012-11-15' and '2012-11-15'
+			and		s.secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+			and 	mmid not in ('PINK','TEST','QXQX','NQB')
+			and		sourcesystem = 'pink'
+			and		tradingvenue in ('PS','OB','BP')
+			and		status = 'A'
+			and		issuetype = 's'
+			and 	publishdate not in (select hdy_date from hdy_holiday)
+			and		s.secid = q.secid
+			group by 1,2) d,
+   			(select	publishdate,
+					count(distinct mmid) as total_mmid_cnt
+			from	security s, quote q
+			where	publishdate between s.eventtimestamp and nvl(s.endtimestamp, '9999-12-31 00:00:00')
+			and		publishdate between '2012-11-15' and '2012-11-15'
+			and		s.secid not in (select sse_secid from sse_special_security where purpose_type_cd = 'T')
+			and 	mmid not in ('PINK','TEST','QXQX','NQB')
+			and		sourcesystem = 'pink'
+			and		tradingvenue in ('PS','OB','BP')
+			and		status = 'A'
+			and		issuetype = 's'
+			and 	publishdate not in (select hdy_date from hdy_holiday)
+			and		s.secid = q.secid
+			group by 1) e
+	WHERE 	a.plinkdate = b.plinkdate
+	AND 	b.plinkdate = c.publishdate
+	AND 	a.tier = b.tier
+	AND 	b.tier = c.tier
+	AND 	c.publishdate = d.publishdate
+	AND 	a.tier_abbrv = d.tier_abbr
+    AND		d.publishdate = e.publishdate
+	
+	
+	
+============== month_mm_activity.4gl ================================
+select unique ha_secid as secid, 'in' as action 
+from history_act_master
+where ha_broker_symbol = 'BMAS' and
+ha_print_date = '2012-10-01' 
+and (ha_bid > 0 or ha_ask > 0)
+and ha_bbtime != 'N'
+union
+select unique ha_secid as secid, 'add' as action from history_act_master
+where ha_broker_symbol = 'BMAS'
+and ha_print_date between '2012-10-01' and '2012-10-31'
+and (ha_bid > 0 or ha_ask > 0)
+and ha_bbtime != 'N' 
+and ha_secid not in (	select unique ha_secid as secid
+						from history_act_master
+						where ha_broker_symbol = 'BMAS' and
+						ha_print_date = '2012-10-01' 
+						and (ha_bid > 0 or ha_ask > 0)
+						and ha_bbtime != 'N')
+						
+This script requires continuity tests. If there are activities on first trade date of month, then securities quotes are still in the system. If no activities on first trade date but were added later in the month, 
+then these quotes are considered added. If quotes are already in, but there are no continuous activities for these quotes in the month, then these quotes are considered deleted. once a quote is in/added, there must be 
+continuous activities for this security, otherwise it's considered deleted. 
+
+
+
+wombat_trade_feed data is inconsistent with number of trades.
+select *
+from wombat_trade_feed
+where wtf_timestamp between '2012-09-14 00:00:00' and '2012-09-14 23:59:59'
+--and wtf_trade_type = 6
+and wtf_secid = 31629
+
+
+
+
+==== Vertica 6/ DMExpress 7.5.7 Upgrade =====
+quoteaggr initial_load needs to be updated in delete statement
+corpaction initial_load encoding needs to be updated to locale
+
+
+
+
+mailx -s "OTC FIX Trades Over-Throttle Alert for ${TODAY_DATE}" yue@otcmarkets.com, ITManagement@otcmarkets.com, techsupport@otcmarkets.com, subscriberservices@otcmarkets.com, fix_alerts@otcmarkets.com, TSManagement@otcmarkets.com < over_throttle_trade_alert.txt
+
+
+
+
+
+company**
+corpactions**
+dividendex**
+ems_recon**
+FINOP_Report**
+finra_otc**
+jasper_jobs**
+marketmaker**
+otc_security**
+passthru**
+pinklink**
+prod_dr_recon**
+quote**
+quoteaggr**
+security**
+stockscr**
+symbol_info**
+tick_recon**
+trace_sec**
+trade**
+trader_entitlement**
+trader_facts
+trap_recon**
+unsolicited_quotes**
+
+
+
+
+
+SELECT    secid, tradedate, SUM(wbt_volume) AS  wbt_volume,SUM(pink_volume) AS pink_volume,SUM(wbt_dollarvol) AS wbt_dollarvol,SUM(pink_dollarvolume) AS pink_dollarvolume,SUM(wbt_tradecount) AS wbt_tradecount,   SUM(pink_tradecount) AS pink_tradecount
+FROM      (
+SELECT	secid, tradedate,SUM(volume) AS wbt_volume, 0 AS pink_volume,SUM(dollarvolume) AS wbt_dollarvol, 0 AS pink_dollarvolume, SUM(tradecount) AS wbt_tradecount,   0 AS pink_tradecount
+FROM	tradeaggr 
+WHERE	tradedate BETWEEN '2003-01-01' AND '2012-12-31'
+AND	secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+AND         tradedate NOT IN (SELECT hdy_date FROM hdy_holiday)
+GROUP BY 1,2
+UNION ALL
+SELECT	secid, plinkdate AS tradedate,0 AS wbt_volume, SUM(executedqty)  AS pink_volume,0 AS wbt_dollarvol, SUM(executedqty*lastpx) AS pink_dollarvolume,0 AS wbt_tradecount, COUNT(*) AS pink_tradecount
+FROM	pinklink
+WHERE	plinkdate BETWEEN '2005-10-11' AND '2012-12-31'
+AND	secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+AND         plinkdate NOT IN (SELECT hdy_date FROM hdy_holiday)
+AND	orderstate IN (2,3)
+GROUP BY 1,2
+UNION ALL
+SELECT	secid, plinkdate AS tradedate,0 AS wbt_volume, SUM(executedqty)  AS pink_volume,0 AS wbt_dollarvol, SUM(executedqty*price)  AS pink_dollarvolume,0 AS wbt_tradecount, COUNT(*) AS pink_tradecount
+FROM	pinklink
+WHERE	plinkdate BETWEEN '2003-01-01' AND '2005-10-10'
+AND	secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+AND         plinkdate NOT IN (SELECT hdy_date FROM hdy_holiday)
+AND	orderstate IN (2,3)
+GROUP BY 1,2
+) a GROUP BY 1,2
+
+
+
+
+37943|OTCQXFridayBidAsk.job|file:OTCQXFridayBidAsk.job|Friday bid/ask file|Please find the report output in email attachment.|OTCQXFridayBidAsk-@TradeDate@|edward@otcmarkets.com;tp@otcmarkets.com;dinesh@otcmarkets.com;mike@otcmarkets.com;khushboo@otcmarkets.com|/Repository/OTCLink/Operational/OTCQXFridayBidAsk|1
+29883|UBSSNITEEMS1Report.job|file:UBSSNITEEMS1Report.job|NITE UBSS - EMS position 1 Statistic|Please find the report output in email attachment.|rpt_monitor@otcmarkets.com|/Repository/OTCLink/Operational/UBSSNITEEMS1|1
+
+
+
+
+SELECT 	tr_trader_id, tr_firstname, tr_lastname, tr_email 
+FROM 	trader 
+WHERE 	tr_mktmkrloc = (
+		SELECT 	mktmkrloc_id 
+		FROM 	mkt_mkr_location 
+		WHERE 	mktmkrloc_mktmkr = (
+				SELECT 	mktmkr_id 
+				FROM 	market_maker 
+				WHERE 	mktmkr_mmid = 'GUGS'))
+AND		tr_trader_id IN (SELECT te_trader_track_id FROM trader_entitlement WHERE te_status = 1)
+
+
+
+
+
+SELECT	symbol, 'IN' AS action
+FROM	quote
+WHERE	mmid = 'BMAK'
+AND		publishdate = '2013-03-01'
+AND		(secid, publishdate, sequencenumber) IN (
+		SELECT	secid, publishdate, MAX(sequencenumber)
+		FROM	quote
+		WHERE	mmid = 'BMAK'
+		AND		publishdate BETWEEN '2013-03-01' AND '2013-03-31'
+		AND		publishdate NOT IN (SELECT hdy_date FROM hdy_holiday)
+		AND		publishtime < '17:00:00'
+		AND		secid NOT IN (SELECT sse_secid FROM sse_special_security WHERE purpose_type_cd = 'T')
+		AND		updatetype IN (1,2,4)
+		GROUP BY 1,2
+		ORDER BY 1,2
+		)
+AND		(askprice > 0 OR bidprice > 0)
+ORDER BY 1
